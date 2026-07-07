@@ -1,0 +1,48 @@
+name: Boom & Crash Bot v2 — SMC Engine
+
+on:
+  schedule:
+    - cron: "5 0  * * *"
+    - cron: "5 4  * * *"
+    - cron: "5 8  * * *"
+    - cron: "5 12 * * *"
+    - cron: "5 16 * * *"
+    - cron: "5 20 * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    name: Analyse SMC multi-timeframe
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: Checkout du repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Installation des dépendances
+        run: pip install -r requirements.txt
+
+      - name: Lancement du bot
+        env:
+          DERIV_APP_ID:       ${{ secrets.DERIV_APP_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          GIT_USER_NAME:      "Boom-Crash-Bot-v2"
+          GIT_USER_EMAIL:     "bot@boom-crash.local"
+          # Ajouter src/ au PYTHONPATH pour que les imports entre modules fonctionnent
+          PYTHONPATH:         ${{ github.workspace }}/src
+        run: python src/main.py
