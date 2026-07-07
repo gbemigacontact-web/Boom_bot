@@ -43,4 +43,5 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           GIT_USER_NAME:      "Boom-Crash-Bot-v2"
           GIT_USER_EMAIL:     "bot@boom-crash.local"
-        run: PYTHONPATH=$GITHUB_WORKSPACE/src python src/main.py
+        working-directory: src
+        run: python -m main
