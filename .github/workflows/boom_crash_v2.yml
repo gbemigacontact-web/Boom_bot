@@ -36,6 +36,35 @@ jobs:
       - name: Installation des dépendances
         run: pip install -r requirements.txt
 
+      # ── DIAGNOSTIC — à supprimer après correction ──────────────────────────
+      - name: Diagnostic Python path
+        working-directory: src
+        run: |
+          echo "=== Répertoire courant ==="
+          pwd
+          echo ""
+          echo "=== Contenu du répertoire ==="
+          ls -la
+          echo ""
+          echo "=== sys.path Python ==="
+          python -c "import sys; [print(p) for p in sys.path]"
+          echo ""
+          echo "=== Tentative d'import direct ==="
+          python -c "
+          import sys
+          print('sys.path avant:', sys.path[:3])
+          sys.path.insert(0, '.')
+          print('sys.path après insert:', sys.path[:3])
+          try:
+              import scenario_engine
+              print('OK: scenario_engine importé')
+          except ImportError as e:
+              print('ERREUR:', e)
+          "
+          echo ""
+          echo "=== Fichiers .py disponibles ==="
+          find . -name '*.py' | sort
+
       - name: Lancement du bot
         env:
           DERIV_APP_ID:       ${{ secrets.DERIV_APP_ID }}
