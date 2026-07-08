@@ -6,6 +6,7 @@ Moteur de scénarios SMC. Intègre désormais l'analyse continue et l'IA.
 
 from __future__ import annotations
 
+import os
 import logging
 from dataclasses import dataclass, field
 from typing import Optional, List
@@ -163,13 +164,292 @@ class ScenarioEngine:
         self.sm.increment_run(instrument)
         return EngineResult(instrument, state_before, state.state)
 
-    # ... (toutes les méthodes _handle_... restent inchangées, je ne les recopie pas pour rester concis,
-    #      mais elles doivent être gardées telles quelles depuis la version précédente)
-    #      Pour la réponse, je vais les inclure brièvement en indiquant qu'elles sont inchangées.
-    #      En réalité, dans le fichier final, il faut les laisser entièrement.
+    # ── NEUTRE ──
+    def _handle_neutre(self, instrument, data, state, bias, trend_h4, trend_h1, current_price, h4, h1, m15, m5, state_before):
+        if trend_h4.is_range:
+            self.sm.increment_run(instrument)
+            return EngineResult(instrument, state_before, MarketState.NEUTRE, alert=f"{instrument}: H4 en range")
 
-    # (Les méthodes _handle_neutre, _handle_bos_detecte, etc. sont identiques à la dernière version fournie.
-    #  Elles ne sont pas modifiées ici. Le fichier complet les contient, bien sûr.)
+        bos = detect_bos(h1)
+        if not bos:
+            return EngineResult(instrument, state_before, MarketState.NEUTRE)
+
+        expected_bos = Direction.BULLISH if bias == Direction.BEARISH else Direction.BEARISH
+        if bos.direction != expected_bos:
+            return EngineResult(instrument, state_before, MarketState.NEUTRE)
+
+        trade_dir = bias
+        ob = find_ob_nearest_price(h1, trade_dir, current_price)
+        fvg = find_fvg_nearest_price(h1, trade_dir, current_price)
+        highs, lows = find_swing_points(h1, window=3)
+        swing_pt = (lows[-1].price if trade_dir == Direction.BEARISH and lows else
+                    highs[-1].price if trade_dir == Direction.BULLISH and highs else None)
+
+        self.sm.transition(instrument, MarketState.BOS_DETECTE,
+                           bos_direction=bos.direction.value,
+                           ob_high=ob.high if ob else None, ob_low=ob.low if ob else None,
+                           fvg_high=fvg.high if fvg else None, fvg_low=fvg.low if fvg else None,
+                           swing_point=swing_pt)
+        context = _build_context(trend_h4, trend_h1, current_price, bos=bos, ob=ob, fvg=fvg)
+        alert_msg = f"🔔 BOS {bos.direction.value} sur {instrument}\n" + "\n".join(context[1:])
+        return EngineResult(instrument, state_before, MarketState.BOS_DETECTE, alert=alert_msg)
+
+    # ── BOS_DETECTE ──
+    def _handle_bos_detecte(self, instrument, data, state, bias, trend_h4, trend_h1, current_price, h4, h1, m15, m5, state_before):
+        ob_h, ob_l = state.ob_high, state.ob_low
+        fvg_h, fvg_l = state.fvg_high, state.fvg_low
+        swing_pt = state.swing_point
+
+        if swing_pt is not None:
+            if (bias == Direction.BEARISH and current_price < swing_pt) or (bias == Direction.BULLISH and current_price > swing_pt):
+                self.sm.transition(instrument, MarketState.RISQUE_CHOCH)
+                return EngineResult(instrument, state_before, MarketState.RISQUE_CHOCH, alert=f"⚠️ {instrument}: prix au-delà du swing point → RISQUE_CHOCH")
+
+        if fvg_h and fvg_l and price_in_zone(current_price, fvg_l, fvg_h):
+            self.sm.transition(instrument, MarketState.PULLBACK_ZONE_FVG)
+            return EngineResult(instrument, state_before, MarketState.PULLBACK_ZONE_FVG,
+                                alert=f"📍 {instrument}: entrée FVG [{fvg_l:.4f} – {fvg_h:.4f}]")
+        if ob_h and ob_l and price_in_zone(current_price, ob_l, ob_h):
+            self.sm.transition(instrument, MarketState.PULLBACK_ZONE_OB)
+            return EngineResult(instrument, state_before, MarketState.PULLBACK_ZONE_OB,
+                                alert=f"📍 {instrument}: entrée OB [{ob_l:.4f} – {ob_h:.4f}]")
+
+        if not ob_h and not fvg_h:
+            highs, lows = find_swing_points(h1, window=3)
+            if highs and lows:
+                sh = max(highs, key=lambda x: x.price)
+                sl = min(lows, key=lambda x: x.price)
+                fib = compute_fibonacci(sh.price, sl.price, bias)
+                if fib:
+                    self.sm.transition(instrument, MarketState.FIBONACCI_ACTIF,
+                                       fib_swing_high=sh.price, fib_swing_low=sl.price,
+                                       fib_382=fib.fib_382, fib_500=fib.fib_500,
+                                       fib_618=fib.fib_618, fib_786=fib.fib_786)
+                    return EngineResult(instrument, state_before, MarketState.FIBONACCI_ACTIF,
+                                        alert=f"📐 {instrument}: Fibonacci activé (pas d'OB/FVG)")
+        self.sm.increment_run(instrument)
+        return EngineResult(instrument, state_before, MarketState.BOS_DETECTE)
+
+    # ── PULLBACK ZONE ──
+    def _handle_pullback_zone(self, instrument, data, state, bias, trend_h4, trend_h1, current_price, h4, h1, m15, m5, state_before):
+        conf = check_confirmation_candle(m15, bias, volume_multiplier=1.5)
+        mini = detect_mini_choch(m15, bias)
+        if conf.valid or (mini and mini.valid):
+            chosen = conf if conf.valid else mini
+            self.sm.transition(instrument, MarketState.CONFIRMATION_ATTENDUE,
+                               entry_price=chosen.entry_price, signal_direction=bias.value)
+            return EngineResult(instrument, state_before, MarketState.CONFIRMATION_ATTENDUE,
+                                alert=f"✅ {instrument}: confirmation M15 ({chosen.kind.value})")
+
+        ob_h, ob_l = state.ob_high, state.ob_low
+        fvg_h, fvg_l = state.fvg_high, state.fvg_low
+        in_ob = ob_h and ob_l and price_in_zone(current_price, ob_l, ob_h)
+        in_fvg = fvg_h and fvg_l and price_in_zone(current_price, fvg_l, fvg_h)
+        if not in_ob and not in_fvg:
+            swing_pt = state.swing_point
+            if swing_pt and ((bias == Direction.BEARISH and current_price < swing_pt) or (bias == Direction.BULLISH and current_price > swing_pt)):
+                self.sm.transition(instrument, MarketState.RISQUE_CHOCH)
+                return EngineResult(instrument, state_before, MarketState.RISQUE_CHOCH,
+                                    alert=f"⚠️ {instrument}: sortie de zone sans confirmation → RISQUE_CHOCH")
+        self.sm.increment_run(instrument)
+        return EngineResult(instrument, state_before, state.state)
+
+    # ── CONFIRMATION ATTENDUE ──
+    def _handle_confirmation(self, instrument, data, state, bias, trend_h4, trend_h1, current_price, h4, h1, m15, m5, state_before):
+        entry_price = state.entry_price or current_price
+        swing_pt = state.swing_point or current_price
+        h4_targets = find_htf_targets(h4, bias, current_price)
+        sl, tp1, tp2, tp3 = compute_sl_tp(bias, entry_price, swing_pt, h4_targets, m15)
+        risk = abs(entry_price - sl)
+        reward_tp1 = abs(tp1 - entry_price)
+        if risk > 0 and reward_tp1 / risk < 1.5:
+            self.sm.transition(instrument, MarketState.NEUTRE)
+            return EngineResult(instrument, state_before, MarketState.NEUTRE, alert=f"❌ {instrument}: RR insuffisant")
+
+        conf_m5 = check_confirmation_candle(m5, bias, volume_multiplier=1.0)
+        conf_kind = conf_m5.kind.value if conf_m5.valid else "ZONE"
+        wick_r = conf_m5.wick_ratio if conf_m5.valid else 0
+        body_r = conf_m5.body_ratio if conf_m5.valid else 0
+        vol_r = conf_m5.volume_ratio if conf_m5.valid else 0
+
+        scenario = "Scénario 1 — Continuation"
+        if state_before == MarketState.RETOURNEMENT_PULLBACK_ATTENDU:
+            scenario = "Scénario 2 — Retournement"
+        elif state_before == MarketState.FIBONACCI_ACTIF:
+            scenario = "Scénario 3 — Fibonacci"
+
+        context = _build_context(trend_h4, trend_h1, current_price)
+        # Appel IA
+        ai_context = {
+            "instrument": instrument,
+            "trend_h4": trend_h4.direction.value,
+            "trend_h1": trend_h1.direction.value,
+            "scenario": scenario,
+            "direction": bias.value,
+            "current_price": current_price,
+            "bos": "oui",
+            "choch": "non" if "Continuation" in scenario else "oui",
+            "ob": f"{state.ob_low}-{state.ob_high}" if state.ob_high else "aucun",
+            "fvg": f"{state.fvg_low}-{state.fvg_high}" if state.fvg_high else "aucun",
+            "fib": "non",
+            "confirmation": conf_kind,
+        }
+        ai_analysis = analyze_signal_with_gemini(ai_context)
+
+        self.sm.transition(instrument, MarketState.ENTREE_ACTIVE,
+                           entry_price=entry_price, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
+                           signal_direction=bias.value)
+
+        signal = SignalResult(instrument=instrument, direction=bias, scenario=scenario,
+                              state_before=state_before, state_after=MarketState.ENTREE_ACTIVE,
+                              entry_price=entry_price, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
+                              confirmation_kind=conf_kind, wick_ratio=wick_r, body_ratio=body_r,
+                              volume_ratio=vol_r, context_lines=context, ai_analysis=ai_analysis)
+        return EngineResult(instrument, state_before, MarketState.ENTREE_ACTIVE, signal=signal)
+
+    # ── RISQUE CHoCH ──
+    def _handle_risque_choch(self, instrument, data, state, bias, trend_h4, trend_h1, current_price, h4, h1, m15, m5, state_before):
+        choch = detect_choch(h1, trend_h1.direction)
+        if choch:
+            reverse_bias = _opposite(bias)
+            ob_inv = find_ob_nearest_price(h1, reverse_bias, current_price)
+            highs, lows = find_swing_points(h1, window=3)
+            major_high = max(h.price for h in highs) if highs else current_price
+            major_low = min(l.price for l in lows) if lows else current_price
+            self.sm.transition(instrument, MarketState.RETOURNEMENT_SURVEILLANCE,
+                               choch_level=choch.broken_level,
+                               ob_inverse_high=ob_inv.high if ob_inv else None,
+                               ob_inverse_low=ob_inv.low if ob_inv else None,
+                               major_high=major_high, major_low=major_low)
+            return EngineResult(instrument, state_before, MarketState.RETOURNEMENT_SURVEILLANCE,
+                                alert=f"🔄 {instrument}: CHoCH {choch.direction.value} → RETOURNEMENT_SURVEILLANCE")
+
+        ob_h, ob_l = state.ob_high, state.ob_low
+        if ob_h and ob_l and price_in_zone(current_price, ob_l, ob_h):
+            self.sm.transition(instrument, MarketState.PULLBACK_ZONE_OB)
+            return EngineResult(instrument, state_before, MarketState.PULLBACK_ZONE_OB,
+                                alert=f"↩️ {instrument}: rebond OB avant CHoCH")
+        self.sm.increment_run(instrument)
+        return EngineResult(instrument, state_before, MarketState.RISQUE_CHOCH)
+
+    # ── RETOURNEMENT SURVEILLANCE ──
+    def _handle_retournement(self, instrument, data, state, bias, trend_h4, trend_h1, current_price, h4, h1, m15, m5, state_before):
+        reverse_bias = _opposite(bias)
+        # 1. Cartographier les aimants pour fausse cassure
+        if bias == Direction.BEARISH:
+            targets = find_unmitigated_bullish_targets(h1, current_price)
+            if targets:
+                state.false_breakout_target = targets[-1][2]  # high
+        else:
+            targets = find_unmitigated_bearish_targets(h1, current_price)
+            if targets:
+                state.false_breakout_target = targets[0][2]   # low
+
+        # 2. BOS inverse ?
+        bos_inv = detect_bos(h1)
+        if bos_inv and bos_inv.direction == reverse_bias:
+            if (bias == Direction.BEARISH and bos_inv.broken_level <= state.bos_inverse_level) or \
+               (bias == Direction.BULLISH and bos_inv.broken_level >= state.bos_inverse_level):
+                ob_pullback = find_ob_nearest_price(h1, reverse_bias, current_price)
+                fvg_pullback = find_fvg_nearest_price(h1, reverse_bias, current_price)
+                self.sm.transition(instrument, MarketState.RETOURNEMENT_PULLBACK_ATTENDU,
+                                   entry_price=current_price, signal_direction=reverse_bias.value,
+                                   ob_high=ob_pullback.high if ob_pullback else None,
+                                   ob_low=ob_pullback.low if ob_pullback else None,
+                                   fvg_high=fvg_pullback.high if fvg_pullback else None,
+                                   fvg_low=fvg_pullback.low if fvg_pullback else None,
+                                   swing_point=bos_inv.prior_swing.price)
+                return EngineResult(instrument, state_before, MarketState.RETOURNEMENT_PULLBACK_ATTENDU,
+                                    alert=f"✅ {instrument}: BOS {reverse_bias.value} confirmé → attente pullback")
+
+        # 3. Fausse cassure (bonus)
+        if bias == Direction.BEARISH and state.major_high:
+            fb = detect_false_breakout(h1, state.major_high, Direction.BULLISH)
+            if fb:
+                state.false_breakout_high = fb['high']
+        elif bias == Direction.BULLISH and state.major_low:
+            fb = detect_false_breakout(h1, state.major_low, Direction.BEARISH)
+            if fb:
+                state.false_breakout_low = fb['low']
+
+        # 4. Invalidation
+        if bias == Direction.BEARISH and current_price > state.major_high:
+            self.sm.transition(instrument, MarketState.NEUTRE)
+            return EngineResult(instrument, state_before, MarketState.NEUTRE, alert="Retournement annulé, retour haussier")
+        if bias == Direction.BULLISH and current_price < state.major_low:
+            self.sm.transition(instrument, MarketState.NEUTRE)
+            return EngineResult(instrument, state_before, MarketState.NEUTRE, alert="Retournement annulé, retour baissier")
+
+        state.run_count += 1
+        if state.run_count > 30:
+            self.sm.transition(instrument, MarketState.NEUTRE)
+            return EngineResult(instrument, state_before, MarketState.NEUTRE, alert="Timeout retournement")
+        return EngineResult(instrument, state_before, MarketState.RETOURNEMENT_SURVEILLANCE)
+
+    # ── RETOURNEMENT PULLBACK ATTENDU ──
+    def _handle_retournement_pullback(self, instrument, data, state, bias, trend_h4, trend_h1, current_price, h4, h1, m15, m5, state_before):
+        reverse_bias = _opposite(bias)
+        ob_h, ob_l = state.ob_high, state.ob_low
+        fvg_h, fvg_l = state.fvg_high, state.fvg_low
+        swing_pt = state.swing_point
+
+        if swing_pt and ((reverse_bias == Direction.BEARISH and current_price > swing_pt) or (reverse_bias == Direction.BULLISH and current_price < swing_pt)):
+            self.sm.transition(instrument, MarketState.NEUTRE)
+            return EngineResult(instrument, state_before, MarketState.NEUTRE, alert="Pullback retournement invalide")
+
+        if fvg_h and fvg_l and price_in_zone(current_price, fvg_l, fvg_h):
+            self.sm.transition(instrument, MarketState.PULLBACK_ZONE_FVG)
+            return EngineResult(instrument, state_before, MarketState.PULLBACK_ZONE_FVG,
+                                alert=f"📍 {instrument}: pullback retournement dans FVG [{fvg_l:.4f} – {fvg_h:.4f}]")
+        if ob_h and ob_l and price_in_zone(current_price, ob_l, ob_h):
+            self.sm.transition(instrument, MarketState.PULLBACK_ZONE_OB)
+            return EngineResult(instrument, state_before, MarketState.PULLBACK_ZONE_OB,
+                                alert=f"📍 {instrument}: pullback retournement dans OB [{ob_l:.4f} – {ob_h:.4f}]")
+
+        self.sm.increment_run(instrument)
+        return EngineResult(instrument, state_before, MarketState.RETOURNEMENT_PULLBACK_ATTENDU)
+
+    # ── FIBONACCI ──
+    def _handle_fibonacci(self, instrument, data, state, bias, trend_h4, trend_h1, current_price, h4, h1, m15, m5, state_before):
+        if not state.fib_swing_high or not state.fib_swing_low:
+            self.sm.transition(instrument, MarketState.NEUTRE)
+            return EngineResult(instrument, state_before, MarketState.NEUTRE, skipped=True, skip_reason="Fibonacci données manquantes")
+        fib = compute_fibonacci(state.fib_swing_high, state.fib_swing_low, bias)
+        if not fib:
+            return EngineResult(instrument, state_before, MarketState.NEUTRE)
+        near = price_near_fib_level(current_price, fib)
+        if near:
+            conf = check_confirmation_candle(m15, bias, volume_multiplier=1.5)
+            mini = detect_mini_choch(m15, bias)
+            if conf.valid or (mini and mini.valid):
+                swing_ref = state.fib_swing_low if bias == Direction.BEARISH else state.fib_swing_high
+                self.sm.transition(instrument, MarketState.CONFIRMATION_ATTENDUE,
+                                   entry_price=current_price, swing_point=swing_ref, signal_direction=bias.value)
+                return EngineResult(instrument, state_before, MarketState.CONFIRMATION_ATTENDUE,
+                                    alert=f"📐 {instrument}: confirmation Fibonacci sur {near}")
+        self.sm.increment_run(instrument)
+        return EngineResult(instrument, state_before, MarketState.FIBONACCI_ACTIF)
+
+    # ── ENTREE ACTIVE ──
+    def _handle_entree_active(self, instrument, state, current_price, state_before):
+        sl, tp1, direction = state.stop_loss, state.tp1, state.signal_direction
+        if sl and tp1 and direction:
+            if direction == "BEARISH":
+                if current_price >= sl:
+                    self.sm.transition(instrument, MarketState.NEUTRE)
+                    return EngineResult(instrument, state_before, MarketState.NEUTRE, alert=f"🛑 {instrument}: SL atteint")
+                if current_price <= tp1:
+                    self.sm.transition(instrument, MarketState.NEUTRE)
+                    return EngineResult(instrument, state_before, MarketState.NEUTRE, alert=f"🎯 {instrument}: TP1 atteint")
+            else:
+                if current_price <= sl:
+                    self.sm.transition(instrument, MarketState.NEUTRE)
+                    return EngineResult(instrument, state_before, MarketState.NEUTRE, alert=f"🛑 {instrument}: SL atteint")
+                if current_price >= tp1:
+                    self.sm.transition(instrument, MarketState.NEUTRE)
+                    return EngineResult(instrument, state_before, MarketState.NEUTRE, alert=f"🎯 {instrument}: TP1 atteint")
+        self.sm.increment_run(instrument)
+        return EngineResult(instrument, state_before, MarketState.ENTREE_ACTIVE)
 
 
 def run_scenario_engine(market_data: dict[str, InstrumentData], state_manager: StateManager) -> list[EngineResult]:
@@ -186,7 +466,7 @@ def run_scenario_engine(market_data: dict[str, InstrumentData], state_manager: S
             # 2. Traitement du scénario (moteur FSM)
             res = engine.process(instrument, market_data[instrument])
 
-            # 3. Attacher le diagnostic
+            # 3. Attacher le diagnostic au résultat
             res.diagnosis = diagnosis
 
             # 4. Analyse IA (si clé disponible)
