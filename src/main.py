@@ -9,7 +9,7 @@ import sys
 import os
 from pathlib import Path
 
-# Ajouter src/ au chemin Python dès la première ligne exécutable
+# Ajouter src/ au chemin Python
 _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
