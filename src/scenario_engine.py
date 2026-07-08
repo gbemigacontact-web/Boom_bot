@@ -26,7 +26,7 @@ from technical_analysis import (
     detect_mini_choch, detect_false_breakout,
     find_unmitigated_bullish_targets, find_unmitigated_bearish_targets,
 )
-from deriv_client import InstrumentData, get_current_price, is_spread_abnormal, detect_recent_spike, INSTRUMENTS
+from deriv_client import InstrumentData, get_current_price, is_spread_abnormal, detect_recent_spike
 from ai_analyzer import analyze_signal_with_gemini
 from market_analyzer import analyze_market, MarketDiagnosis
 
@@ -456,20 +456,12 @@ def run_scenario_engine(market_data: dict[str, InstrumentData], state_manager: S
     engine = ScenarioEngine(state_manager)
     results = []
 
-    for instrument in INSTRUMENTS:
-        if instrument not in market_data:
-            continue
+    for instrument in market_data:
         try:
-            # 1. Diagnostic systématique
             diagnosis = engine.diagnose(instrument, market_data[instrument])
-
-            # 2. Traitement du scénario (moteur FSM)
             res = engine.process(instrument, market_data[instrument])
-
-            # 3. Attacher le diagnostic au résultat
             res.diagnosis = diagnosis
 
-            # 4. Analyse IA (si clé disponible)
             if os.environ.get("GEMINI_API_KEY"):
                 ai_prompt = {
                     "instrument": instrument,
