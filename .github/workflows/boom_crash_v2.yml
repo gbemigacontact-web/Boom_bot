@@ -1,76 +1,36 @@
-name: Boom & Crash Bot v2 — SMC Engine
+name: Boom Crash Bot v2
 
 on:
   schedule:
-    - cron: "5 0  * * *"
-    - cron: "5 4  * * *"
-    - cron: "5 8  * * *"
-    - cron: "5 12 * * *"
-    - cron: "5 16 * * *"
-    - cron: "5 20 * * *"
-
-  workflow_dispatch:
-
-permissions:
-  contents: write
+    # Exécution toutes les 15 minutes
+    - cron: '*/15 * * * *'
+  workflow_dispatch:   # permet de lancer manuellement
 
 jobs:
-  scan:
-    name: Analyse SMC multi-timeframe
+  run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 5
 
     steps:
-      - name: Checkout du repo
+      - name: Checkout du dépôt
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}  # pour pouvoir pusher l'état
 
-      - name: Setup Python 3.11
+      - name: Configurer Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: "pip"
+          python-version: '3.11'
 
-      - name: Installation des dépendances
+      - name: Installer les dépendances
         run: pip install -r requirements.txt
 
-      # ── DIAGNOSTIC — à supprimer après correction ──────────────────────────
-      - name: Diagnostic Python path
-        working-directory: src
-        run: |
-          echo "=== Répertoire courant ==="
-          pwd
-          echo ""
-          echo "=== Contenu du répertoire ==="
-          ls -la
-          echo ""
-          echo "=== sys.path Python ==="
-          python -c "import sys; [print(p) for p in sys.path]"
-          echo ""
-          echo "=== Tentative d'import direct ==="
-          python -c "
-          import sys
-          print('sys.path avant:', sys.path[:3])
-          sys.path.insert(0, '.')
-          print('sys.path après insert:', sys.path[:3])
-          try:
-              import scenario_engine
-              print('OK: scenario_engine importé')
-          except ImportError as e:
-              print('ERREUR:', e)
-          "
-          echo ""
-          echo "=== Fichiers .py disponibles ==="
-          find . -name '*.py' | sort
-
-      - name: Lancement du bot
+      - name: Exécuter le bot
         env:
-          DERIV_APP_ID:       ${{ secrets.DERIV_APP_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          GIT_USER_NAME:      "Boom-Crash-Bot-v2"
-          GIT_USER_EMAIL:     "bot@boom-crash.local"
-        working-directory: src
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GIT_USER_NAME: ${{ secrets.GIT_USER_NAME }}
+          GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
         run: python -m main
+        working-directory: src
