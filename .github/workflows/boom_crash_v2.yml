@@ -2,9 +2,8 @@ name: Boom Crash Bot v2
 
 on:
   schedule:
-    # Exécution toutes les 15 minutes
     - cron: '*/15 * * * *'
-  workflow_dispatch:   # permet de lancer manuellement
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -15,7 +14,7 @@ jobs:
       - name: Checkout du dépôt
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}  # pour pouvoir pusher l'état
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configurer Python
         uses: actions/setup-python@v5
