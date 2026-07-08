@@ -1,7 +1,7 @@
 """
 telegram_notifier.py
 ====================
-Envoi des signaux et alertes via Telegram.
+Envoi des signaux, alertes et diagnostics via Telegram.
 """
 
 import os
@@ -55,3 +55,20 @@ def notify_results(results: List, run_time_seconds: float, send_summary: bool = 
     if send_summary:
         summary = f"🏁 Run terminé en {run_time_seconds:.1f}s — {len(signals)} signal(s), {len(alerts)} alerte(s), {len(skipped)} ignoré(s)"
         send_message(summary)
+
+
+def notify_diagnoses(diagnoses):
+    """Envoie un résumé de l'état du marché pour tous les instruments."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    lines = ["📈 <b>Résumé du marché</b>", ""]
+    for d in diagnoses:
+        lines.append(f"<b>{d.instrument}</b>: {d.detected_scenario}")
+        lines.append(f"  → {d.recommendation}: {d.recommendation_reason}")
+        if d.last_choch:
+            lines.append(f"  CHoCH @ {d.last_choch.broken_level:.4f}")
+        if d.last_bos:
+            lines.append(f"  Dernier BOS @ {d.last_bos.broken_level:.4f}")
+        lines.append("")
+    send_message("\n".join(lines))
