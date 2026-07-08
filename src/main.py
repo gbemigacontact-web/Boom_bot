@@ -4,24 +4,20 @@ main.py
 Point d'entrée principal du bot Boom & Crash v2.
 """
 
-# ── PATH — doit être fait AVANT tout autre import ────────────────────────────
 import sys
 import os
 from pathlib import Path
 
-# Ajouter src/ au chemin Python
 _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-# ── Imports standard ─────────────────────────────────────────────────────────
 import asyncio
 import logging
 import subprocess
 import time
 from datetime import datetime, timezone
 
-# ── Configuration du logging ─────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -29,21 +25,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-# ── Chemins ──────────────────────────────────────────────────────────────────
 ROOT_DIR   = _SRC_DIR.parent
 DATA_DIR   = ROOT_DIR / "data"
 STATE_FILE = DATA_DIR / "market_states.json"
 
-# ── Imports locaux (après sys.path) ──────────────────────────────────────────
 from deriv_client import fetch_all_market_data
 from state_machine import StateManager
 from scenario_engine import run_scenario_engine
-from telegram_notifier import notify_results
+from telegram_notifier import notify_results, notify_diagnoses
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Commit automatique de l'état dans GitHub
-# ─────────────────────────────────────────────────────────────────────────────
 
 def commit_state(state_file: Path) -> None:
     git_name  = os.environ.get("GIT_USER_NAME",  "Boom-Crash-Bot-v2")
@@ -69,10 +59,6 @@ def commit_state(state_file: Path) -> None:
     except subprocess.CalledProcessError as e:
         logger.warning(f"Commit non bloquant: {e}")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Cycle principal
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def run() -> None:
     start_time = time.time()
@@ -110,6 +96,12 @@ async def run() -> None:
 
     run_time = time.time() - start_time
     notify_results(results, run_time_seconds=run_time, send_summary=True)
+
+    # Envoyer un résumé des diagnostics toutes les heures (quand la minute est 0)
+    if datetime.now(timezone.utc).minute == 0:
+        diagnoses = [r.diagnosis for r in results if r.diagnosis]
+        if diagnoses:
+            notify_diagnoses(diagnoses)
 
     commit_state(STATE_FILE)
 
