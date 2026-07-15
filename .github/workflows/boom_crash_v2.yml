@@ -1,35 +1,62 @@
-name: Boom Crash Bot v2
+name: Boom & Crash Bot v2 — SMC Engine (IA + Fallback)
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: "5 0  * * *"
+    - cron: "5 4  * * *"
+    - cron: "5 8  * * *"
+    - cron: "5 12 * * *"
+    - cron: "5 16 * * *"
+    - cron: "5 20 * * *"
+
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  run-bot:
+  scan:
+    name: Analyse SMC multi-timeframe (IA + fallback)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Relevé de 12 à 20 minutes : un run peut désormais inclure jusqu'à
+    # 6 appels Gemini (images + jugement structurel complet), en plus de
+    # la récupération de données élargie (500 bougies H4/H1) et de la
+    # génération des graphiques. Le fallback Python reste rapide, mais le
+    # budget doit couvrir le pire cas (tous les instruments en analyse IA).
+    timeout-minutes: 20
 
     steps:
-      - name: Checkout du dépôt
+      - name: Checkout du repo
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
 
-      - name: Configurer Python
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+          cache: "pip"
 
-      - name: Installer les dépendances
+      - name: Installation des dépendances
         run: pip install -r requirements.txt
 
-      - name: Exécuter le bot
+      - name: Lancement du bot
         env:
+          DERIV_APP_ID:       ${{ secrets.DERIV_APP_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GIT_USER_NAME: ${{ secrets.GIT_USER_NAME }}
-          GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
-        run: python -m main
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Clé API Gemini — à créer dans Settings → Secrets and
+          # variables → Actions → New repository secret, nom
+          # "GEMINI_API_KEY". Sans ce secret, le bot journalise un
+          # avertissement au démarrage et fonctionne en mode fallback
+          # Python intégral pour le run (voir main.py::check_environment).
+          GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
+          # Optionnel — décommenter pour forcer un modèle différent du
+          # défaut ("gemini-2.5-pro" défini dans ai_analyzer.py), par
+          # exemple un modèle plus rapide/économique :
+          # GEMINI_MODEL:      "gemini-2.5-flash"
+          GIT_USER_NAME:      "Boom-Crash-Bot-v2"
+          GIT_USER_EMAIL:     "bot@boom-crash.local"
         working-directory: src
+        run: python -m main
