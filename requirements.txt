@@ -1,2 +1,25 @@
-websockets==12.0
-requests==2.31.0
+# requirements.txt — Bot Boom & Crash v2 (architecture hybride IA)
+# Python 3.11 (voir boom_crash_v2.yml)
+
+# ── Connexion Deriv (données de marché) ──────────────────────────────────────
+websockets>=12.0
+
+# ── Notifications Telegram ────────────────────────────────────────────────────
+requests>=2.31.0
+
+# ── Génération des graphiques (chart_renderer.py) ─────────────────────────────
+# mplfinance dépend de pandas et matplotlib ; Pillow sert à lire les
+# dimensions de l'image générée avant l'envoi à Gemini.
+mplfinance>=0.12.10b0
+pandas>=2.2.0
+matplotlib>=3.8.0
+Pillow>=10.2.0
+
+# ── Analyse IA (ai_analyzer.py) ───────────────────────────────────────────────
+# google-genai : SDK officiel unifié Google (remplace l'ancien
+# google-generativeai, déprécié). Nécessaire pour l'appel à Gemini avec
+# sortie structurée garantie (response_schema).
+google-genai>=1.0.0
+
+# pydantic : définit le schéma de sortie strict de Gemini (GeminiVerdict)
+pydantic>=2.6.0
