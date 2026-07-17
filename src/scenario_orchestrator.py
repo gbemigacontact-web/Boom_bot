@@ -92,7 +92,14 @@ class OrchestratorResult:
     instrument: str
     source: str               # "IA" | "FALLBACK" | "GUARD" | "POSITION" | "ERROR"
     signal: Optional[OrchestratorSignal] = None
+    # `alert` : uniquement rempli pour un évènement NOTABLE (changement de
+    # lecture, invalidation, erreur) → déclenche un message Telegram
+    # individuel. Reste à None pour une confirmation "rien de nouveau",
+    # afin d'éviter le spam à chaque run.
     alert: Optional[str] = None
+    # `status_text` : TOUJOURS rempli, résumé compact utilisé dans le
+    # résumé de fin de run — même quand `alert` est None.
+    status_text: Optional[str] = None
     skipped: bool = False
     skip_reason: str = ""
     position_closed: bool = False
@@ -164,10 +171,13 @@ def _check_active_position(
             position_close_reason=f"🎯 TP1 atteint @ {current_price:.4f}",
         )
 
+    # Position toujours ouverte, rien de nouveau : pas d'alerte individuelle
+    # (éviterait un message Telegram identique à chaque run), seulement le
+    # statut visible dans le résumé de fin de run.
     return OrchestratorResult(
         instrument=instrument, source="POSITION",
-        alert=(
-            f"⏳ Position {direction} en cours — prix {current_price:.4f} "
+        status_text=(
+            f"Position {direction} en cours — prix {current_price:.4f} "
             f"(entrée {ai_trade.entry_price:.4f}, SL {sl:.4f}, TP1 {tp1:.4f})"
         ),
     )
@@ -225,8 +235,11 @@ def _apply_ai_verdict(
     zone_label = ai_result.resolved_zone.label if ai_result.resolved_zone else None
 
     # Mémoire IA mise à jour dans TOUS les cas (continuité du run suivant),
-    # y compris quand aucune action n'est prise.
-    state_manager.update_ai_memory(
+    # y compris quand aucune action n'est prise. update_ai_memory incrémente
+    # consecutive_watch_runs si la lecture (scénario + action) est identique
+    # au run précédent — on s'en sert juste après pour décider si ce
+    # run mérite une notification individuelle ou juste une ligne de résumé.
+    mem = state_manager.update_ai_memory(
         instrument,
         scenario=verdict.scenario_identifie.value,
         biais=verdict.biais_institutionnel.value,
@@ -240,21 +253,34 @@ def _apply_ai_verdict(
         commentaire=verdict.commentaire_strategique,
         source="IA",
     )
+    is_new_reading = mem.consecutive_watch_runs == 1
+
+    status = (
+        f"{verdict.scenario_identifie.value} | biais {verdict.biais_institutionnel.value} "
+        f"| confiance {verdict.confiance}%"
+    )
 
     if verdict.action_requise == ActionRequise.ATTENDRE:
-        return OrchestratorResult(
-            instrument=instrument, source="IA",
-            alert=(
+        alert_text = None
+        if is_new_reading:
+            # Nouvelle lecture (différente du run précédent) : ça vaut la
+            # peine de notifier. Une lecture répétée reste dans le résumé
+            # uniquement, pour éviter le spam.
+            alert_text = (
                 f"👁️ {instrument} — {verdict.scenario_identifie.value} | "
                 f"biais {verdict.biais_institutionnel.value} | "
                 f"confiance {verdict.confiance}%\n{verdict.commentaire_strategique}"
-            ),
+            )
+        return OrchestratorResult(
+            instrument=instrument, source="IA",
+            alert=alert_text, status_text=status,
         )
 
     if verdict.action_requise == ActionRequise.INVALIDE:
         return OrchestratorResult(
             instrument=instrument, source="IA",
             alert=f"❌ {instrument}: structure invalidée — {verdict.commentaire_strategique}",
+            status_text=f"INVALIDÉ | {status}",
         )
 
     # ── ACHETER / VENDRE ──────────────────────────────────────────────────
@@ -320,7 +346,10 @@ def _apply_ai_verdict(
         confiance=verdict.confiance,
         source="IA",
     )
-    return OrchestratorResult(instrument=instrument, source="IA", signal=signal)
+    return OrchestratorResult(
+        instrument=instrument, source="IA", signal=signal,
+        status_text=f"SIGNAL {trade_direction} | {verdict.scenario_identifie.value}",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -337,6 +366,7 @@ def _convert_fallback_result(instrument: str, er: EngineResult) -> OrchestratorR
         return OrchestratorResult(
             instrument=instrument, source="FALLBACK",
             skipped=True, skip_reason=er.skip_reason,
+            status_text=f"ignoré : {er.skip_reason}",
             fsm_transition=transition_note,
         )
 
@@ -359,12 +389,15 @@ def _convert_fallback_result(instrument: str, er: EngineResult) -> OrchestratorR
         )
         return OrchestratorResult(
             instrument=instrument, source="FALLBACK", signal=signal,
+            status_text=f"SIGNAL {signal.direction} | {signal.scenario} (fallback)",
             fsm_transition=transition_note,
         )
 
     return OrchestratorResult(
         instrument=instrument, source="FALLBACK",
-        alert=er.alert, fsm_transition=transition_note,
+        alert=er.alert,
+        status_text=(transition_note or er.state_after.value),
+        fsm_transition=transition_note,
     )
 
 
@@ -389,6 +422,7 @@ def _process_instrument(
         return OrchestratorResult(
             instrument=instrument, source="GUARD",
             skipped=True, skip_reason="Données manquantes",
+            status_text="ignoré : données manquantes",
         )
 
     current_price = get_current_price(data)
@@ -402,11 +436,13 @@ def _process_instrument(
         return OrchestratorResult(
             instrument=instrument, source="GUARD",
             skipped=True, skip_reason="Spread anormal",
+            status_text="ignoré : spread anormal",
         )
     if detect_recent_spike(data.get("M5", [])):
         return OrchestratorResult(
             instrument=instrument, source="GUARD",
             skipped=True, skip_reason="Spike récent M5",
+            status_text="ignoré : spike récent M5",
         )
 
     h4, h1 = data["H4"], data["H1"]
@@ -474,6 +510,7 @@ def run_orchestrator(
             result = OrchestratorResult(
                 instrument=instrument, source="ERROR",
                 skipped=True, skip_reason=f"Erreur interne: {e}",
+                status_text=f"erreur : {e}",
             )
 
         results.append(result)
