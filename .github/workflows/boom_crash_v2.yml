@@ -52,10 +52,11 @@ jobs:
           # avertissement au démarrage et fonctionne en mode fallback
           # Python intégral pour le run (voir main.py::check_environment).
           GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
-          # Optionnel — décommenter pour forcer un modèle différent du
-          # défaut ("gemini-2.5-pro" défini dans ai_analyzer.py), par
-          # exemple un modèle plus rapide/économique :
-          # GEMINI_MODEL:      "gemini-2.5-flash"
+          # Modèle Gemini — "gemini-2.5-flash" car le niveau gratuit de
+          # l'API ne couvre pas "gemini-2.5-pro" (erreurs 429 sinon).
+          # Repasse à "gemini-2.5-pro" ici si tu actives la facturation
+          # Google (voir ai_analyzer.py pour le détail du choix).
+          GEMINI_MODEL:        "gemini-2.5-flash"
           GIT_USER_NAME:      "Boom-Crash-Bot-v2"
           GIT_USER_EMAIL:     "bot@boom-crash.local"
         working-directory: src
