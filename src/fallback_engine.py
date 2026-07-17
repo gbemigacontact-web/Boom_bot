@@ -65,11 +65,11 @@ from technical_analysis import (
     check_confirmation_candle, price_in_zone,
     detect_false_breakout,
     find_htf_targets, compute_sl_tp, find_swing_points,
-    compute_volume_average,
 )
 from deriv_client import (
     InstrumentData, get_current_price,
     is_spread_abnormal, detect_recent_spike,
+    compute_volume_average,
     INSTRUMENTS,
 )
 
