@@ -42,9 +42,11 @@ Dépendances à ajouter à requirements.txt : google-genai, pydantic.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -70,18 +72,22 @@ Candle = dict
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Modèle Gemini utilisé. "gemini-2.5-pro" est retenu par défaut pour la
-# qualité de raisonnement structurel (des décisions de trading en
-# dépendent). Configurable via variable d'environnement si tu préfères
-# un modèle plus rapide/économique (ex: "gemini-2.5-flash").
-# ⚠️ Vérifie la disponibilité et le tarif du modèle dans Google AI Studio
-# avant le premier run — l'offre Gemini évolue régulièrement.
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+# Modèle Gemini utilisé. "gemini-3.5-flash" est le modèle gratuit actuel
+# pour les nouveaux comptes (lancé à Google I/O 2026, sans carte
+# bancaire requise). Le catalogue de modèles Gemini change régulièrement
+# et Google retire parfois d'anciens modèles pour les nouveaux comptes
+# (c'est arrivé à "gemini-2.5-flash") — si ce modèle venait à son tour à
+# ne plus être disponible, vérifie la liste à jour dans Google AI Studio
+# et ajuste via la variable d'environnement GEMINI_MODEL, sans toucher
+# au code.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
-# Niveau de raisonnement interne du modèle (si supporté). "HIGH" pour
-# maximiser la qualité de jugement structurel — c'est un bot de trading,
-# pas un chatbot, la profondeur de raisonnement prime sur la latence.
-GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "HIGH")
+# Niveau de raisonnement interne du modèle (si supporté). "MEDIUM" par
+# défaut : un niveau "HIGH" laissait trop peu de budget de tokens pour
+# écrire la réponse structurée finale (JSON tronqué observé en test réel),
+# malgré un budget de sortie généreux. "MEDIUM" reste un raisonnement
+# sérieux tout en garantissant plus fiablement une réponse complète.
+GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "MEDIUM")
 
 # Timeout réseau par appel (millisecondes)
 GEMINI_TIMEOUT_MS = int(os.environ.get("GEMINI_TIMEOUT_MS", "45000"))
@@ -199,7 +205,7 @@ class ActionRequise(str, Enum):
     ATTENDRE = "ATTENDRE"
     ACHETER = "ACHETER"
     VENDRE = "VENDRE"
-    INVALIDE = "INVALIDÉ"
+    INVALIDE = "INVALIDE"
 
 
 class GeminiVerdict(BaseModel):
@@ -247,6 +253,61 @@ class GeminiVerdict(BaseModel):
         "explique la décision en langage trader."
     )
     confiance: int = Field(ge=0, le=100, description="Niveau de confiance 0-100")
+
+
+def _normalize_enum_value(value, enum_cls) -> object:
+    """
+    Corrige les variations mineures que Gemini peut produire sur une
+    valeur censée correspondre à un Enum strict : casse différente,
+    accents manquants/en trop, espaces superflus. Retourne la valeur
+    d'origine si aucune correspondance tolérante n'est trouvée (la
+    validation Pydantic échouera alors normalement, avec un message
+    clair dans les logs).
+    """
+    if not isinstance(value, str):
+        return value
+
+    def _strip_accents(s: str) -> str:
+        return "".join(
+            c for c in unicodedata.normalize("NFD", s)
+            if unicodedata.category(c) != "Mn"
+        )
+
+    target = _strip_accents(value.strip().upper())
+    for member in enum_cls:
+        candidate = _strip_accents(member.value.strip().upper())
+        if target == candidate:
+            return member.value
+    return value
+
+
+def _normalize_verdict_dict(data: dict) -> dict:
+    """
+    Applique la tolérance de normalisation à tous les champs de type
+    Enum du schéma, et corrige les types numériques inattendus (Gemini
+    renvoie parfois un nombre en texte ou en flottant). Utilisée
+    uniquement en filet de secours quand le parsing strict automatique
+    (response.parsed) échoue.
+    """
+    enum_fields = {
+        "tendance_h4": TendanceLue,
+        "tendance_h1": TendanceLue,
+        "biais_institutionnel": TendanceLue,
+        "scenario_identifie": ScenarioSMC,
+        "type_confirmation": TypeConfirmation,
+        "action_requise": ActionRequise,
+    }
+    for field_name, enum_cls in enum_fields.items():
+        if field_name in data:
+            data[field_name] = _normalize_enum_value(data[field_name], enum_cls)
+
+    if "confiance" in data and isinstance(data["confiance"], (float, str)):
+        try:
+            data["confiance"] = int(round(float(data["confiance"])))
+        except (TypeError, ValueError):
+            pass
+
+    return data
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -569,7 +630,10 @@ def analyze_instrument(
         response_mime_type="application/json",
         response_schema=GeminiVerdict,
         temperature=GEMINI_TEMPERATURE,
-        max_output_tokens=2000,
+        # Relevé à 8192 (depuis 4096) : marge supplémentaire de sécurité si
+        # le raisonnement interne consomme une part variable et imprévisible
+        # du budget total avant l'écriture du JSON final.
+        max_output_tokens=8192,
     )
 
     start = time.monotonic()
@@ -590,21 +654,77 @@ def analyze_instrument(
         except Exception:
             config = types.GenerateContentConfig(**config_kwargs)
 
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=config,
-        )
+        response = None
+        last_error: Optional[Exception] = None
+        for attempt in range(1, 3):  # 1 tentative + 1 nouvel essai max
+            try:
+                response = client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=contents,
+                    config=config,
+                )
+                break
+            except Exception as e:
+                last_error = e
+                error_text = str(e)
+                is_quota = (
+                    "429" in error_text or "RESOURCE_EXHAUSTED" in error_text.upper()
+                    or "quota" in error_text.lower()
+                )
+                is_transient = (
+                    "503" in error_text or "UNAVAILABLE" in error_text.upper()
+                    or "500" in error_text
+                )
+                if is_quota:
+                    raise  # géré par le bloc except englobant (coupe-circuit)
+                if is_transient and attempt == 1:
+                    logger.warning(
+                        f"{instrument}: panne serveur Gemini transitoire "
+                        f"({e}) — nouvel essai dans 3s"
+                    )
+                    time.sleep(3)
+                    continue
+                raise
+
+        if response is None:
+            raise last_error or RuntimeError("Appel Gemini sans réponse")
 
         latency = time.monotonic() - start
 
         verdict: Optional[GeminiVerdict] = getattr(response, "parsed", None)
+
+        if verdict is None:
+            # Le parsing strict automatique a échoué (schéma non respecté à
+            # la lettre) — on tente une validation manuelle tolérante avant
+            # d'abandonner. Ça récupère les cas bénins (casse, accents,
+            # nombre en texte) sans jamais accepter une valeur hors schéma.
+            raw_text = getattr(response, "text", None)
+            if raw_text:
+                try:
+                    data = json.loads(raw_text)
+                    data = _normalize_verdict_dict(data)
+                    verdict = GeminiVerdict.model_validate(data)
+                    logger.info(
+                        f"{instrument}: verdict Gemini récupéré après "
+                        f"normalisation manuelle du schéma"
+                    )
+                except Exception as parse_err:
+                    logger.error(
+                        f"{instrument}: échec de validation du schéma Gemini "
+                        f"— {parse_err}\nRéponse brute (tronquée à 1500 "
+                        f"caractères) : {raw_text[:1500]}"
+                    )
+            else:
+                logger.error(
+                    f"{instrument}: réponse Gemini vide ou sans texte exploitable"
+                )
+
         if verdict is None:
             return AnalyzerResult(
                 instrument=instrument, success=False,
                 candidates_sent=candidates,
                 error="Réponse Gemini reçue mais non conforme au schéma attendu",
-                latency_seconds=latency,
+                latency_seconds=time.monotonic() - start,
             )
 
         # Garde-fou de cohérence (cahier des charges) : une action ne
