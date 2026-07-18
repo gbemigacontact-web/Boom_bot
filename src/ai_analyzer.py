@@ -42,11 +42,9 @@ Dépendances à ajouter à requirements.txt : google-genai, pydantic.
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
 import time
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -72,15 +70,13 @@ Candle = dict
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Modèle Gemini utilisé. "gemini-3.5-flash" est le modèle gratuit actuel
-# pour les nouveaux comptes (lancé à Google I/O 2026, sans carte
-# bancaire requise). Le catalogue de modèles Gemini change régulièrement
-# et Google retire parfois d'anciens modèles pour les nouveaux comptes
-# (c'est arrivé à "gemini-2.5-flash") — si ce modèle venait à son tour à
-# ne plus être disponible, vérifie la liste à jour dans Google AI Studio
-# et ajuste via la variable d'environnement GEMINI_MODEL, sans toucher
-# au code.
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+# Modèle Gemini utilisé. "gemini-2.5-pro" est retenu par défaut pour la
+# qualité de raisonnement structurel (des décisions de trading en
+# dépendent). Configurable via variable d'environnement si tu préfères
+# un modèle plus rapide/économique (ex: "gemini-2.5-flash").
+# ⚠️ Vérifie la disponibilité et le tarif du modèle dans Google AI Studio
+# avant le premier run — l'offre Gemini évolue régulièrement.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
 
 # Niveau de raisonnement interne du modèle (si supporté). "HIGH" pour
 # maximiser la qualité de jugement structurel — c'est un bot de trading,
@@ -203,7 +199,7 @@ class ActionRequise(str, Enum):
     ATTENDRE = "ATTENDRE"
     ACHETER = "ACHETER"
     VENDRE = "VENDRE"
-    INVALIDE = "INVALIDE"
+    INVALIDE = "INVALIDÉ"
 
 
 class GeminiVerdict(BaseModel):
@@ -251,61 +247,6 @@ class GeminiVerdict(BaseModel):
         "explique la décision en langage trader."
     )
     confiance: int = Field(ge=0, le=100, description="Niveau de confiance 0-100")
-
-
-def _normalize_enum_value(value, enum_cls) -> object:
-    """
-    Corrige les variations mineures que Gemini peut produire sur une
-    valeur censée correspondre à un Enum strict : casse différente,
-    accents manquants/en trop, espaces superflus. Retourne la valeur
-    d'origine si aucune correspondance tolérante n'est trouvée (la
-    validation Pydantic échouera alors normalement, avec un message
-    clair dans les logs).
-    """
-    if not isinstance(value, str):
-        return value
-
-    def _strip_accents(s: str) -> str:
-        return "".join(
-            c for c in unicodedata.normalize("NFD", s)
-            if unicodedata.category(c) != "Mn"
-        )
-
-    target = _strip_accents(value.strip().upper())
-    for member in enum_cls:
-        candidate = _strip_accents(member.value.strip().upper())
-        if target == candidate:
-            return member.value
-    return value
-
-
-def _normalize_verdict_dict(data: dict) -> dict:
-    """
-    Applique la tolérance de normalisation à tous les champs de type
-    Enum du schéma, et corrige les types numériques inattendus (Gemini
-    renvoie parfois un nombre en texte ou en flottant). Utilisée
-    uniquement en filet de secours quand le parsing strict automatique
-    (response.parsed) échoue.
-    """
-    enum_fields = {
-        "tendance_h4": TendanceLue,
-        "tendance_h1": TendanceLue,
-        "biais_institutionnel": TendanceLue,
-        "scenario_identifie": ScenarioSMC,
-        "type_confirmation": TypeConfirmation,
-        "action_requise": ActionRequise,
-    }
-    for field_name, enum_cls in enum_fields.items():
-        if field_name in data:
-            data[field_name] = _normalize_enum_value(data[field_name], enum_cls)
-
-    if "confiance" in data and isinstance(data["confiance"], (float, str)):
-        try:
-            data["confiance"] = int(round(float(data["confiance"])))
-        except (TypeError, ValueError):
-            pass
-
-    return data
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -658,39 +599,12 @@ def analyze_instrument(
         latency = time.monotonic() - start
 
         verdict: Optional[GeminiVerdict] = getattr(response, "parsed", None)
-
-        if verdict is None:
-            # Le parsing strict automatique a échoué (schéma non respecté à
-            # la lettre) — on tente une validation manuelle tolérante avant
-            # d'abandonner. Ça récupère les cas bénins (casse, accents,
-            # nombre en texte) sans jamais accepter une valeur hors schéma.
-            raw_text = getattr(response, "text", None)
-            if raw_text:
-                try:
-                    data = json.loads(raw_text)
-                    data = _normalize_verdict_dict(data)
-                    verdict = GeminiVerdict.model_validate(data)
-                    logger.info(
-                        f"{instrument}: verdict Gemini récupéré après "
-                        f"normalisation manuelle du schéma"
-                    )
-                except Exception as parse_err:
-                    logger.error(
-                        f"{instrument}: échec de validation du schéma Gemini "
-                        f"— {parse_err}\nRéponse brute (tronquée à 1500 "
-                        f"caractères) : {raw_text[:1500]}"
-                    )
-            else:
-                logger.error(
-                    f"{instrument}: réponse Gemini vide ou sans texte exploitable"
-                )
-
         if verdict is None:
             return AnalyzerResult(
                 instrument=instrument, success=False,
                 candidates_sent=candidates,
                 error="Réponse Gemini reçue mais non conforme au schéma attendu",
-                latency_seconds=time.monotonic() - start,
+                latency_seconds=latency,
             )
 
         # Garde-fou de cohérence (cahier des charges) : une action ne
