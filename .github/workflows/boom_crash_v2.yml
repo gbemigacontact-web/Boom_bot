@@ -2,12 +2,16 @@ name: Boom & Crash Bot v2 — SMC Engine (IA + Fallback)
 
 on:
   schedule:
+    # 3 runs/jour (toutes les 8h) au lieu de 6 (toutes les 4h).
+    # Raison : le quota gratuit Gemini pour gemini-3.5-flash est de
+    # 20 requêtes/jour. Avec 6 instruments par run, le pire cas (aucun
+    # guard ne filtre rien) donne 6 × nb_runs appels IA/jour :
+    #   - 6 runs/jour → jusqu'à 36 appels → dépasse systématiquement le quota
+    #   - 3 runs/jour → jusqu'à 18 appels → reste sous la limite, avec
+    #     une marge de 2 pour des tests manuels (workflow_dispatch)
     - cron: "5 0  * * *"
-    - cron: "5 4  * * *"
     - cron: "5 8  * * *"
-    - cron: "5 12 * * *"
     - cron: "5 16 * * *"
-    - cron: "5 20 * * *"
 
   workflow_dispatch:
 
